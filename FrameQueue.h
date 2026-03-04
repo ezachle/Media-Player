@@ -2,28 +2,23 @@
 extern "C" {
 #include <ffmpeg/libavutil/frame.h>
 }
-#include <chrono>
 #include <memory>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 
-struct Test {
-    void operator()(AVFrame *p) { av_frame_free(&p); }
-};
-
-using Frame = std::unique_ptr<AVFrame, Test>;
+using Frame = std::unique_ptr<AVFrame>;
 class FrameQueue {
     public:
         FrameQueue(size_t size) : max_size(size){}
         void push(AVFrame *frame) {
             if(!frame) return;
-
             std::unique_lock<std::mutex> lock(mtx);
 
             // Don't queue any frames if already full
-            not_full.wait(lock, [this]() { return !quit_flag && queue.size() < max_size; });
+            not_full.wait(lock, [this]() { return quit_flag || queue.size() < max_size; });
             if(quit_flag) return;
+
             queue.push(Frame(frame));
             not_empty.notify_one();
         }
@@ -31,7 +26,7 @@ class FrameQueue {
         AVFrame* pop() {
             std::unique_lock<std::mutex> lock(mtx);
             // Wait to receive something
-            not_empty.wait(lock, [this](){ return !quit_flag && queue.size() > 0; });
+            not_empty.wait(lock, [this](){ return quit_flag || queue.size() > 0; });
             if(quit_flag) return nullptr;
 
             Frame f = std::move(queue.front());
@@ -43,8 +38,8 @@ class FrameQueue {
 
         void quit() { 
             quit_flag = true;
-            not_full.notify_one();
             not_empty.notify_one();
+            not_full.notify_one();
         }
         size_t get_size() { return queue.size(); }
 
