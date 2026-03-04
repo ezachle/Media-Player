@@ -7,6 +7,17 @@ extern "C" {
 #include <mutex>
 #include <queue>
 
+/*
+ * Uses the C++ STL Queue to handle how frames are
+ * moved from the decode packets thread to the respective
+ * AV thread
+ * 
+ * Both push() and pop() utilize the not_full and not_empty
+ * condition_variable to manage when to push and pop off the
+ * queue.
+ *
+ */
+
 using Frame = std::unique_ptr<AVFrame>;
 class FrameQueue {
     public:
@@ -41,6 +52,7 @@ class FrameQueue {
             not_empty.notify_one();
             not_full.notify_one();
         }
+
         size_t get_size() { return queue.size(); }
 
         ~FrameQueue() {
