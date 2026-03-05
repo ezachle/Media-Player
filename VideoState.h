@@ -8,13 +8,13 @@ extern "C" {
 #include <SDL3/SDL.h>
 }
 #include <thread>
-#include <stdexcept>
 #include <memory>
 #include <string>
 #include "FrameQueue.h"
 
 // With the usage of the Functors below, allows us to cleanly
-// free pointers to Ffmpeg and SDL
+// free pointers to Ffmpeg and SDL, no need to manually free
+// memory
 struct SDLDestructors {
     void operator()(SDL_Window *p) { if(p) SDL_DestroyWindow(p); }
     void operator()(SDL_Renderer *p) { if(p) SDL_DestroyRenderer(p); }
@@ -43,11 +43,17 @@ using FfmpegPtr = std::unique_ptr<T, FfmpegDestructors>;
 /*
  * Tolerance level of AV sync
  *  AV_SYNC_THRESHOLD       our minimum
+ *      If it goes below our threshold, we schedule a refresh to show it ASAP
  *  AV_NO_SYNC_THRESHOLD    our maximum
+ *      If it goes above the threshold, its a late frame and consider it skipped
  */
 #define AV_SYNC_THRESHOLD 0.01
 #define AV_NO_SYNC_THRESHOLD 10.0
 
+/*
+ * Max perecentage the code is allowed to stretch/shrink the audio
+ * to match the audio
+ */
 #define SAMPLE_CORRECTION_PERCENT_MAX 10
 #define AUDIO_DIFF_AVG_NB 20
 
@@ -109,7 +115,7 @@ class VideoState {
     private:
         void setup_video();
         void setup_audio();
-        void audio_callback(SDL_AudioStream *stream, int additional_amount, int total_amount);
+        void audio_callback(SDL_AudioStream *stream, int additional_amount);
         static void audio_callback_wrapper(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount);
         static void video_thread(VideoState *vs);
         static void decode_packets(VideoState *vs);

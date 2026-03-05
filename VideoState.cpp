@@ -6,6 +6,10 @@ extern "C" {
 #include <ffmpeg/libavutil/time.h>
 };
 
+typedef std::chrono::milliseconds ms;
+
+#define UNUSED(x) ((void)x)
+
 VideoState::VideoState(const char* file_path): queue_max_size(32), v_queue(FrameQueue(32)), a_queue(FrameQueue(32)) {
    int rc = 0;
     quit = false;
@@ -51,6 +55,8 @@ VideoState::VideoState(const char* file_path): queue_max_size(32), v_queue(Frame
     setup_video();
     setup_audio();
 
+    std::this_thread::sleep_for(ms(10));
+
     decode_t = new std::thread(decode_packets, this);
 }
 
@@ -69,6 +75,11 @@ VideoState::~VideoState() {
 }
 
 
+/**
+ *  Responsible for finding the AVStream, allocating memory for ffmpeg
+ *  and SDL objects, and spinning off the thread that will dequeue
+ *  frames to be queued into the picture queue
+ */
 void VideoState::setup_video() {
     int rc;
     const AVCodec *codec = avcodec_find_decoder(v_stream->codecpar->codec_id);
@@ -116,6 +127,10 @@ void VideoState::setup_video() {
     video_t = new std::thread(video_thread, this);
 }
 
+/**
+ *  Responsible for finding the AVStream, setting up audio output,
+ *  SDL audio callback
+ */
 void VideoState::setup_audio() {
     int rc;
     const AVCodec *codec;
@@ -183,30 +198,41 @@ void VideoState::setup_audio() {
 // SDL callback: void (*)(void *, SDL_AudioStream, int, int)
 // Member function: void (VideoState::*)(void*, SDL_AudioStream, int, int)
 void VideoState::audio_callback_wrapper(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount) {
+    UNUSED(total_amount);
     const auto vs = reinterpret_cast<VideoState*>(userdata);
-    vs->audio_callback(stream, additional_amount, total_amount);
+    vs->audio_callback(stream, additional_amount);
 }
 
-void VideoState::audio_callback(SDL_AudioStream *stream, int additional_amount, int total_amount) {
+/**
+ *  Audio callback function set for SDL that will fire off when SDL requires audio.
+ *  One thing to note is that audio_decode_frame() can return more bytes than what is
+ *  requested @additional_amount. When the SDL requires data again, the surplus
+ *  will be added into the audio stream instead of decoding another frame.
+ *  @param stream Audio output stream for SDL
+ *  @param additional_amount Number of bytes that SDL requires for audio
+ */
+void VideoState::audio_callback(SDL_AudioStream *stream, int additional_amount) {
     int len, audio_size;
     while(additional_amount > 0){
         if(quit) return;
-       if(a_buffer_idx >= a_buffer_size){
-            // Entering this if-statement means its out first time entering or we already sent
-            // our data and are looking for more
+        if(a_buffer_idx >= a_buffer_size){
+            // Entering this if-statement means its THE FIRST TIME ENTERING or we ALREADY SENT
+            // DATA and are looking for more
             audio_size = audio_decode_frame();
             if(audio_size < 0) { // Output silence
                 a_buffer_size = 1024;
                 std::memset(&a_buffer, 0, a_buffer_size);
                 std::cerr << "audio_decode_frame() error, outputting silence" << std::endl;
             } else {
+                // resample the audio
                 audio_size = sync_audio(reinterpret_cast<short*>(a_buffer), audio_size);
                 a_buffer_size = audio_size;
             }
+            // Reset the index to prepare for copying into the buffer
             a_buffer_idx = 0;
         }
 
-        // Check how much space is remaining in the audio buf
+        // Calculate how much of the buffer we can add into the audio stream
         int remaining = a_buffer_size - a_buffer_idx;
         len = (remaining > additional_amount) ? additional_amount : remaining;
 
@@ -222,16 +248,35 @@ double VideoState::get_video_clock() {
     return current_video_pts + ((av_gettime() - current_video_pts_time) / 1000000.0);
 }
 
+/**
+ * Calculates the real-time audio clock position
+ * Return the PTS of the current sample subtracted
+ * from the last decoded PTS
+ *
+ * @returns Adjusted PTS
+ */
 double VideoState::get_audio_clock() {
     double pts;
     double hw_buffer_size, bytes_per_sec, bytes_per_sample, sdl_queued;
 
+    // note nb_channels for L and R for example
+    //      2 because the chosen output format is SDL_AUDIO_S16
+    //        16 == 2 bytes
+    bytes_per_sample = out_channel.nb_channels * 2;
+
+    // retrieve the latest PTS
     pts = a_clock;
+
+    // Find how much is remaining in the audio buffer +
+    // how much is already queued in SDL
     hw_buffer_size = a_buffer_size - a_buffer_idx;
     sdl_queued = SDL_GetAudioStreamQueued(a_sdl_stream.get());
-    bytes_per_sample = out_channel.nb_channels * 2;
+
     bytes_per_sec = a_ctxt->sample_rate * bytes_per_sample;
     if(bytes_per_sec > 0)
+        // Calculate the latency needed per sec to play the audio
+        //  i.e. (4096) / ((2 *2) * 44100)
+        //          == ~0.02s delay
         pts -= (double)(hw_buffer_size + sdl_queued) / bytes_per_sec;
 
     return pts;
@@ -245,25 +290,47 @@ double VideoState::get_master_clock() {
             return get_audio_clock();
         case AV_SYNC_TYPE_EXTERNAL:
         default:
-            return av_gettime() / 1000000.0;
+            return av_gettime() / (double)AV_TIME_BASE;
     }
 }
 
+/*
+ * Resamples the audio frame according to the output format
+ *
+ * @param vs
+ * @param swr
+ * @param f Audio frame to be adjusted
+ * @param out_fmt
+ * @param audio_buf
+ * @return Converted sample size in bytes required the audio buffer
+ */
 static int resample_audio(VideoState *vs, SwrContext *swr, AVFrame *f, AVSampleFormat out_fmt, uint8_t *audio_buf) {
     if(vs->quit) return -1;
     auto av = vs->get_audio_context();
     int line_size = 0;
     const AVChannelLayout out_channel = vs->get_out_channel();
 
+    // Calculate the number of samples for the output buffer
+    // relative to the (previous_frame + current frame)
+    //  swr_get_delay will get that progressive delay
     int out_nb_samples = av_rescale_rnd(swr_get_delay(swr, f->sample_rate) + f->nb_samples,
                                         av->sample_rate,
                                         f->sample_rate, 
                                         AV_ROUND_UP);
+
+    // Takes the raw frame and outputs it to the output buffer
+    // In this case, output is SDL_AUDIO_S16
     out_nb_samples = swr_convert(swr, &audio_buf, out_nb_samples, (const uint8_t**)f->data, f->nb_samples); 
 
     return av_samples_get_buffer_size(&line_size, out_channel.nb_channels, out_nb_samples, out_fmt, 32);
 }
 
+/*
+ * Dequeues from the audio FrameQueue, adjusts the PTS according to 
+ * the adjusted audio frame, and returns the audio size
+ *
+ * @return Bytes to be put into the SDL Audio Stream
+ */
 int VideoState::audio_decode_frame() {
     int data_size;
 
@@ -271,21 +338,32 @@ int VideoState::audio_decode_frame() {
     auto frame = f.get();
     if( frame == nullptr ) return 0;
 
+    // Use the frame's PTS if available as it is the best thing to
+    // key off of. Set the clock relative to the PTS
+    //  PTS * time base
     if(frame->pts != AV_NOPTS_VALUE) {
         a_clock = av_q2d(a_stream->time_base) * frame->pts;
     }
 
-    // scale audio via av_rescale
+    // shrink or resize the audio frame
     data_size = resample_audio(this, a_swr.get(), frame, out_fmt, a_buffer); 
     if(data_size <= 0) return 0;
 
     int bytes_per_sample = out_channel.nb_channels * 2;
+
+    // adds delay to the audio clock in regard to the bytes each frame
+    // needs
     a_clock += (double)data_size / (double)(bytes_per_sample * a_ctxt->sample_rate);
 
     return data_size;
 }
 
 
+/*
+ * Responsible for dequeuing frames from the video FrameQueue,
+ * calculates the PTS, and queues the frame to be ready for
+ * displaying
+ */
 void VideoState::video_thread(VideoState *vs) {
     // PTS == Presentation Timestamp
     //  Responsible for when the user should see the image
@@ -308,11 +386,18 @@ void VideoState::video_thread(VideoState *vs) {
     }
 }
 
+/*
+ * Scales the given frame according to the window and queues up said frame
+ * into a picture queue
+ *
+ * @param p_frame Frame about to be queued
+ * @param pts The time in seconds on when to present frame
+ */
 int VideoState::queue_picture(AVFrame *p_frame, double pts) {
     std::unique_lock<std::mutex> lock(pictq_mutex);
     while(!quit && pictq_size >= VIDEO_PICTURE_QUEUE_SIZE) {
         pictq_cond.wait_for(lock,
-                            std::chrono::milliseconds(40),
+                            ms(40),
                             [this](){ return this->pictq_size < VIDEO_PICTURE_QUEUE_SIZE;});
     }
     lock.unlock();
@@ -321,7 +406,7 @@ int VideoState::queue_picture(AVFrame *p_frame, double pts) {
     VideoPicture *vp = &pictq[pictq_windex];
     if(!vp->in_use || vp->frame == nullptr) {
         vp->pts = pts;
-        alloc_picture();
+        if(alloc_picture() == -1) return -1;
     }
 
     int rc = sws_scale( v_sws.get(),
@@ -347,6 +432,12 @@ int VideoState::queue_picture(AVFrame *p_frame, double pts) {
     return 0;
 }
 
+/*
+ * Allocates an image buffer respective to the out format
+ * Populates frame->data and frame->linesize
+ *  
+ * @returns 0 on success -1 if quitting
+ */
 int VideoState::alloc_picture() {
     if(quit) return -1;
     int rc = 0;
@@ -367,25 +458,33 @@ int VideoState::alloc_picture() {
     return 0;
 }
 
+// Called when a refresh is necessary, adds the user-made event FF_REFRESH_EVENT
+// into the SDL event queue. The main thread will pick up on this and refresh
+// the video
 static uint32_t sdl_refresh_timer_cb(void *userdata, SDL_TimerID timerID, Uint32 interval) {
     SDL_Event event;
     event.type = FF_REFRESH_EVENT;
     event.user.data1 = userdata;
     SDL_PushEvent(&event);
-    //(static_cast<VideoState*>(userdata))->check_sdl("Pushing event", __LINE__);
 
     return 0;
 }
 
+/*
+ *  Function actually responsible for displaying the video frame
+ *  to the SDL Window and Renderer
+ */
 void VideoState::video_display() {
     if(quit) return;
 
     VideoPicture *vp = &pictq[pictq_rindex];
     if(!quit && vp->in_use && vp->frame != nullptr) {
         std::lock_guard<std::mutex> lock(screen_mutex);
+        // Calculates the delay using the base frame rate, and
+        // schedules a refresh according to the in milliseconds
+        // Tells the main thread when to display next frame
         double fps = av_q2d(v_stream->r_frame_rate);
         double delay = 1.0 / fps;
-
         schedule_refresh(this, static_cast<int>((delay * 1000) - 10));
 
         auto f = vp->frame;
@@ -406,6 +505,8 @@ void VideoState::video_display() {
 
         SDL_RenderPresent(renderer.get());
         check_sdl("Presenting", __LINE__);
+        
+        // Reset the frame in our buffer to reuse
         av_frame_unref(f);
         vp->in_use = 0;
     }
@@ -423,6 +524,7 @@ double VideoState::sync_audio(short *samples, int samples_size) {
         // we want to add or cut off
         if(fabs(diff) < AV_NO_SYNC_THRESHOLD) {
             // Exponentially Weighted Moving Average
+            // This formula is used to smooth out the jitter
             audio_diff_cum = diff + audio_diff_avg_coef * audio_diff_cum; 
             if(audio_diff_avg_count < AUDIO_DIFF_AVG_NB) {
                 audio_diff_avg_count++;
@@ -481,12 +583,15 @@ double VideoState::sync_video(AVFrame *src, double pts) {
 
     // Calculate the total delay to apply to our clock
     frame_delay = av_q2d(v_stream->time_base);
+    // account for any repeated frames. the 0.5 is a safety precaution
     frame_delay += src->repeat_pict * (frame_delay * 0.5);
     v_clock += frame_delay;
     return pts;
 }
 
 void schedule_refresh(VideoState *vs, int delay) {
+    // The passed in delay tells SDL how long to wait before calling the
+    // callback
     SDL_AddTimer(delay, sdl_refresh_timer_cb, vs);
     //vs->check_sdl("Scheduling refresh", __LINE__);
     SDL_ClearError();
@@ -501,9 +606,13 @@ void VideoState::refresh_video() {
     if(quit) return;
 
     VideoPicture *vp = &pictq[pictq_rindex];
+
+    // Calculate the difference for when it SHOULD be presented
+    // versus the clock
     double diff = vp->pts - get_master_clock();
 
     if(diff > AV_SYNC_THRESHOLD) {
+        // It's early, reschedule it using the calculated diff
         schedule_refresh(this, (int)(diff * 1000));
         return;
     } else if(diff < -AV_NO_SYNC_THRESHOLD) {
@@ -530,6 +639,7 @@ void VideoState::refresh_video() {
 void VideoState::decode_packets(VideoState *vs) {
     FfmpegPtr<AVPacket> p_pkt(av_packet_alloc());
     FfmpegPtr<AVFrame> queue_f(av_frame_alloc());
+    AVCodecContext *av_ctxt = NULL;
     auto file_ctxt = vs->get_format_context();
     int audio_stream_idx = vs->get_audio_stream_index();
     int video_stream_idx = vs->get_video_stream_index();
@@ -538,44 +648,50 @@ void VideoState::decode_packets(VideoState *vs) {
     while(!vs->quit) {
         if(vs->v_queue.get_size() > (size_t)MAX_VIDEOQ_SIZE / vs->queue_max_size ||
            vs->a_queue.get_size() > (size_t)MAX_AUDIOQ_SIZE / vs->queue_max_size ) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ms(40);
             continue;
         }
+
+        // Returns a reference counted packet for an AV stream
         if((rc = av_read_frame(file_ctxt, p_pkt.get())) < 0 ) {
             if(rc == AVERROR_EOF || rc == AVERROR(rc)) continue;
             vs->check_av("Reading frame", rc, __LINE__);
         }
         
-        AVCodecContext *av_ctxt = NULL;
+        // Find the associated AVCodecContext of the packet
         if(p_pkt->stream_index == audio_stream_idx) {
             av_ctxt = vs->get_audio_context();
         } else if(p_pkt->stream_index == video_stream_idx) {
             av_ctxt = vs->get_video_context();
         }
 
-        if(av_ctxt != nullptr) {
-            rc = avcodec_send_packet(av_ctxt, p_pkt.get());
+        // Send the packet to the associated AVStream
+        rc = avcodec_send_packet(av_ctxt, p_pkt.get());
+        if(rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
+            // New data is needed, go fetch more through read frame
+            continue;
+        }
+        vs->check_av("Sending packet to av stream", rc, __LINE__);
+
+        while(rc >= 0 && !vs->quit) {
+            // Exhaust all possible frames in the given packet and queue into
+            // the associate AV FrameQueue
+            //
+            // Will return in the frames in PTS order
+            rc = avcodec_receive_frame(av_ctxt, queue_f.get());
             if(rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
-                continue;
-            } else if(rc < 0) {
-                vs->check_av("Sending packet for decoding", rc, __LINE__);
+                // No available, frame, retry again
+                break;
+            } else if(rc != 0){
+                av_log(nullptr, AV_LOG_WARNING, "Failed to receive frame: rc=%d", rc);
+                break;
             }
 
-            while(rc >= 0 && !vs->quit) {
-                // Will return in the frames in PTS order
-                rc = avcodec_receive_frame(av_ctxt, queue_f.get());
-                if(rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) {
-                    // No available, frame, retry again
-                    break;
-                } else if(rc != 0){
-                    av_log(nullptr, AV_LOG_WARNING, "Failed to receive frame: rc=%d", rc);
-                    break;
-                }
-
-                vs->queue_frame(p_pkt->stream_index, av_frame_clone(queue_f.get()));
-            }
+            // Queue need its own reference of the packet
+            vs->queue_frame(p_pkt->stream_index, av_frame_clone(queue_f.get()));
         }
 
+        // unreference p_pkt for reuse in read_frame
         av_packet_unref(p_pkt.get());
     }
 }
