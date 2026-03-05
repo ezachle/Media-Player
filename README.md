@@ -2,6 +2,7 @@
 Created using ffmpeg to decode the audio and SDL3 to output to a window.
 
 ## Library Versions
+```
 Name            : SDL3
 Epoch           : 0
 Version         : 3.4.0
@@ -33,6 +34,7 @@ Description     : FFmpeg is a complete and free Internet live audio and video
                 : VCR. It can encode in real time in many formats including MPEG1 audio
                 : and video, MPEG4, h263, ac3, asf, avi, real, mjpeg, and flash.
 Vendor          : RPM Fusion
+```
 
 ## Compile
 To compile, run
