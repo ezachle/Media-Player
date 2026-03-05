@@ -652,6 +652,10 @@ void VideoState::decode_packets(VideoState *vs) {
             continue;
         }
 
+        // unreference for reuse
+        av_packet_unref(p_pkt.get());
+        av_frame_unref(queue_f.get());
+
         // Returns a reference counted packet for an AV stream
         if((rc = av_read_frame(file_ctxt, p_pkt.get())) < 0 ) {
             if(rc == AVERROR_EOF || rc == AVERROR(rc)) continue;
@@ -663,6 +667,8 @@ void VideoState::decode_packets(VideoState *vs) {
             av_ctxt = vs->get_audio_context();
         } else if(p_pkt->stream_index == video_stream_idx) {
             av_ctxt = vs->get_video_context();
+        } else {
+            continue;
         }
 
         // Send the packet to the associated AVStream
@@ -690,9 +696,6 @@ void VideoState::decode_packets(VideoState *vs) {
             // Queue need its own reference of the packet
             vs->queue_frame(p_pkt->stream_index, av_frame_clone(queue_f.get()));
         }
-
-        // unreference p_pkt for reuse in read_frame
-        av_packet_unref(p_pkt.get());
     }
 }
 
