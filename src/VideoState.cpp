@@ -248,7 +248,7 @@ void VideoState::audio_callback(SDL_AudioStream *stream, int additional_amount) 
  */
 double VideoState::get_audio_clock() {
     double pts;
-    double hw_buffer_size, bytes_per_sec, bytes_per_sample, sdl_queued;
+    double hw_buffer_size, bytes_per_sec, bytes_per_sample;
 
     // note nb_channels for L and R for example
     //      2 because the chosen output format is SDL_AUDIO_S16
@@ -261,14 +261,13 @@ double VideoState::get_audio_clock() {
     // Find how much is remaining in the audio buffer +
     // how much is already queued in SDL
     hw_buffer_size = a_buffer_size - a_buffer_idx;
-    sdl_queued = SDL_GetAudioStreamQueued(a_sdl_stream.get());
 
     bytes_per_sec = a_ctxt->sample_rate * bytes_per_sample;
     if(bytes_per_sec > 0)
         // Calculate the latency needed per sec to play the audio
         //  i.e. (4096) / ((2 *2) * 44100)
         //          == ~0.02s delay
-        pts -= (double)(hw_buffer_size + sdl_queued) / bytes_per_sec;
+        pts -= (double)(hw_buffer_size) / bytes_per_sec;
 
     return pts;
 }
@@ -674,7 +673,7 @@ void VideoState::decode_packets(VideoState *vs) {
         if(vs->seek_pending) {
             // seek_delay must be in AV_TIME_BASE
             // av_rescale_q here converts the source PTS time base to the destination
-            vs->seek_delay = av_rescale_q(vs->seek_delay, AV_TIME_BASE_Q, vs->a_ctxt->time_base);
+            vs->seek_delay = av_rescale_q(vs->seek_delay, AV_TIME_BASE_Q, vs->a_stream->time_base);
             int rc = av_seek_frame(vs->file_ctxt.get(), audio_stream_idx, vs->seek_delay, vs->seek_flags);
             vs->check_av("av_seek_frame()", rc, __LINE__);
 
