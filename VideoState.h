@@ -109,6 +109,7 @@ class VideoState {
         void check_sdl(const std::string& action, int line);
         void check_av(const std::string &msg, int rc, int line);
 
+        void pause();
         void schedule_seek(int64_t delay);
         void refresh_video();
 
@@ -181,6 +182,7 @@ class VideoState {
         double                              v_clock;
         double                              a_clock;
 
+        bool                                is_paused = false;
         bool                                seek_pending = false;
         int                                 seek_flags;
         int64_t                             seek_delay;

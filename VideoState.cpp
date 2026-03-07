@@ -660,6 +660,7 @@ void VideoState::decode_packets(VideoState *vs) {
     int rc = 0;
 
     while(!vs->quit) {
+        if(vs->is_paused) continue;
         if(vs->v_queue.get_size() > (size_t)MAX_VIDEOQ_SIZE / vs->queue_max_size ||
            vs->a_queue.get_size() > (size_t)MAX_AUDIOQ_SIZE / vs->queue_max_size ) {
             ms(40);
@@ -681,6 +682,7 @@ void VideoState::decode_packets(VideoState *vs) {
             vs->a_queue.flush();
             avcodec_flush_buffers(vs->v_ctxt.get());
             avcodec_flush_buffers(vs->a_ctxt.get());
+            vs->check_av("avcodec_flush_buffers()", rc, __LINE__);
 
             vs->audio_diff_cum = vs->audio_diff_avg_count = 0;
             vs->seek_pending = false;
@@ -730,6 +732,15 @@ void VideoState::decode_packets(VideoState *vs) {
             // Queue need its own reference of the packet
             vs->queue_frame(p_pkt->stream_index, av_frame_clone(queue_f.get()));
         }
+    }
+}
+
+void VideoState::pause(){
+    is_paused = !is_paused;
+    if(is_paused == true) {
+        SDL_PauseAudioStreamDevice(a_sdl_stream.get());
+    } else {
+        SDL_ResumeAudioStreamDevice(a_sdl_stream.get());
     }
 }
 

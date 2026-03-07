@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
                             }
                             delay += (event.key.key == SDLK_RIGHT) ? 10.0 : -10.0;
                             last_time_pressed = SDL_GetTicks();
+                        } else if(event.key.key == SDLK_SPACE){
+                            vs.pause(); 
                         }
                         break;
                     default:
