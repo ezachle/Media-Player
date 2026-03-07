@@ -3,6 +3,7 @@ extern "C" {
 #include <ffmpeg/libavutil/frame.h>
 }
 #include <memory>
+#include <string>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -27,8 +28,8 @@ class FrameQueue {
             std::unique_lock<std::mutex> lock(mtx);
 
             // Don't queue any frames if already full
-            not_full.wait(lock, [this]() { return quit_flag || queue.size() < max_size; });
-            if(quit_flag) return;
+            not_full.wait(lock, [this]() { return quit_flag || flush_flag || queue.size() < max_size; });
+            if(quit_flag || flush_flag) return;
 
             queue.push(Frame(frame));
             not_empty.notify_one();
@@ -37,14 +38,32 @@ class FrameQueue {
         AVFrame* pop() {
             std::unique_lock<std::mutex> lock(mtx);
             // Wait to receive something
-            not_empty.wait(lock, [this](){ return quit_flag || queue.size() > 0; });
-            if(quit_flag) return nullptr;
+            not_empty.wait(lock, [this](){ return quit_flag || flush_flag || queue.size() > 0; });
+            if(quit_flag || flush_flag) return nullptr;
 
             Frame f = std::move(queue.front());
             queue.pop();
 
             not_full.notify_one();
             return f.release();
+        }
+
+        void flush() {
+            if(quit_flag) return;
+            flush_flag = true;
+            not_empty.notify_one();
+            not_full.notify_one();
+            {
+                std::unique_lock<std::mutex> lock(mtx);
+                while(!queue.empty()) {
+                    queue.pop();
+                }
+            }
+
+            flush_flag = false;
+            AVFrame *flush_frame = av_frame_alloc();
+            flush_frame->opaque = new std::string("FLUSH");
+            push(flush_frame);
         }
 
         void quit() { 
@@ -66,5 +85,6 @@ class FrameQueue {
         std::condition_variable not_full;   // Disallows enqueuing frames when the size exceeds the max
         std::condition_variable not_empty;  // Disallows dequeuing frames when there are 0 frames
         bool quit_flag = false;
+        bool flush_flag = false;
         size_t max_size;
 };

@@ -328,6 +328,11 @@ int VideoState::audio_decode_frame() {
     FfmpegPtr<AVFrame> f(dequeue_frame(audio_stream_idx));
     auto frame = f.get();
     if( frame == nullptr ) return 0;
+    if(f->opaque != nullptr) {
+        av_frame_unref(frame);
+        av_free(frame->opaque);
+        return 0;
+    }
 
     // Use the frame's PTS if available as it is the best thing to
     // key off of. Set the clock relative to the PTS
@@ -364,6 +369,20 @@ void VideoState::video_thread(VideoState *vs) {
     while(!vs->quit) {
         AVFrame *f = vs->dequeue_frame(idx);
         if(f ==  nullptr || f == NULL) continue;
+        if(f->opaque != nullptr) {
+            av_frame_unref(f);
+            av_free(f->opaque);
+            std::lock_guard<std::mutex> lock(vs->pictq_mutex);
+
+            auto s = vs->get_master_clock();
+            for(int i = 0; i < VIDEO_PICTURE_QUEUE_SIZE; i++) {
+                VideoPicture *vp = &vs->pictq[i];
+                vp->pts = s;
+                vp->in_use = false;
+                av_frame_unref(vp->frame);
+            }
+            continue;
+        }
 
         // Best effort timestamp gives us a clue on when to display the image
         // av_q2d is responsible for converting the frame to the same
@@ -447,6 +466,20 @@ int VideoState::alloc_picture() {
 
     return 0;
 }
+
+void VideoState::update_pictq_index() {
+    std::lock_guard<std::mutex> lock(pictq_mutex);
+
+    VideoPicture *vp = &pictq[pictq_rindex];
+    vp->in_use = false;
+    if(++pictq_rindex >= VIDEO_PICTURE_QUEUE_SIZE) {
+        pictq_rindex = 0;
+    }
+
+    pictq_size--;
+    pictq_cond.notify_all();
+}
+
 
 // Called when a refresh is necessary, adds the user-made event FF_REFRESH_EVENT
 // into the SDL event queue. The main thread will pick up on this and refresh
@@ -637,6 +670,26 @@ void VideoState::decode_packets(VideoState *vs) {
         av_packet_unref(p_pkt.get());
         av_frame_unref(queue_f.get());
 
+        if(vs->seek_pending) {
+            // seek_delay must be in AV_TIME_BASE
+            // av_rescale_q here converts the source PTS time base to the destination
+            vs->seek_delay = av_rescale_q(vs->seek_delay, AV_TIME_BASE_Q, vs->a_ctxt->time_base);
+            int rc = av_seek_frame(vs->file_ctxt.get(), audio_stream_idx, vs->seek_delay, vs->seek_flags);
+            vs->check_av("av_seek_frame()", rc, __LINE__);
+
+            vs->v_queue.flush();
+            vs->a_queue.flush();
+            avcodec_flush_buffers(vs->v_ctxt.get());
+            avcodec_flush_buffers(vs->a_ctxt.get());
+
+            vs->audio_diff_cum = vs->audio_diff_avg_count = 0;
+            vs->seek_pending = false;
+            vs->v_clock = vs->a_clock = vs->seek_delay;
+
+            SDL_FlushEvent(FF_REFRESH_EVENT);
+            SDL_FlushAudioStream(vs->a_sdl_stream.get());
+        }
+
         // Returns a reference counted packet for an AV stream
         if((rc = av_read_frame(file_ctxt, p_pkt.get())) < 0 ) {
             if(rc == AVERROR_EOF || rc == AVERROR(rc)) continue;
@@ -678,6 +731,16 @@ void VideoState::decode_packets(VideoState *vs) {
             vs->queue_frame(p_pkt->stream_index, av_frame_clone(queue_f.get()));
         }
     }
+}
+
+/**
+ * Using the @param delay, it determines how many seconds
+ * we are going forward or backwards
+ */
+void VideoState::schedule_seek(int64_t delay) {
+    seek_flags = (delay < 0) ? AVSEEK_FLAG_BACKWARD : 0;
+    seek_pending = true;
+    seek_delay = delay * AV_TIME_BASE;
 }
 
 void VideoState::queue_frame(int stream_idx, AVFrame *f) {

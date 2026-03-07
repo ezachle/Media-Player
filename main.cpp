@@ -17,6 +17,9 @@ int main(int argc, char **argv) {
             schedule_refresh(&vs, 39);
 
             SDL_Event event;
+            double delay = 0.0;
+            bool seek = false;
+            uint64_t last_time_pressed = 0;
             while(!vs.quit) {
                 SDL_WaitEvent(&event);
                 switch(event.type) {
@@ -27,6 +30,24 @@ int main(int argc, char **argv) {
                     case FF_REFRESH_EVENT:
                         vs.refresh_video();
                         break;
+                    case SDL_EVENT_KEY_DOWN:
+                        if(event.key.key == SDLK_RIGHT || event.key.key == SDLK_LEFT) {
+                            if(!seek) {
+                                seek = true;
+                                delay = vs.get_master_clock();
+                            }
+                            delay += (event.key.key == SDLK_RIGHT) ? 10.0 : -10.0;
+                            last_time_pressed = SDL_GetTicks();
+                        }
+                        break;
+                    default:
+                        break;
+                }
+
+                if(seek && (SDL_GetTicks() - last_time_pressed) > 300) {
+                    seek = false;
+                    last_time_pressed = 0;
+                    vs.schedule_seek((int64_t)delay);
                 }
             }
         }
