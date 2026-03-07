@@ -39,6 +39,8 @@ Vendor          : RPM Fusion
 ## Compile
 To compile, run
 ```
-make MediaPlayer
-./MediaPlayer <video>
+cmake -B build
+cmake --build build
+cd build
+./MediaPlayer <path>
 ```
