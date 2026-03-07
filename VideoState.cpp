@@ -2,9 +2,6 @@
 #include <cstring>
 #include <iostream>
 #include "VideoState.h"
-extern "C" {
-#include <ffmpeg/libavutil/time.h>
-};
 
 typedef std::chrono::milliseconds ms;
 
@@ -57,6 +54,7 @@ VideoState::VideoState(const char* file_path): queue_max_size(32), v_queue(Frame
 
     std::this_thread::sleep_for(ms(10));
 
+    start_time = av_gettime() / 1000000.0;
     decode_t = new std::thread(decode_packets, this);
 }
 
@@ -120,9 +118,6 @@ void VideoState::setup_video() {
     }
 
     v_clock = 0;
-    current_video_pts_time = av_gettime();
-    last_frame_delay = 40e-3;
-    frame_timer = av_gettime() / 1000000.0;
 
     video_t = new std::thread(video_thread, this);
 }
@@ -244,10 +239,6 @@ void VideoState::audio_callback(SDL_AudioStream *stream, int additional_amount) 
     }
 }
 
-double VideoState::get_video_clock() {
-    return current_video_pts + ((av_gettime() - current_video_pts_time) / 1000000.0);
-}
-
 /**
  * Calculates the real-time audio clock position
  * Return the PTS of the current sample subtracted
@@ -283,14 +274,13 @@ double VideoState::get_audio_clock() {
 }
 
 double VideoState::get_master_clock() {
+    if(seek_pending) return seek_delay;
     switch(av_type) {
-        case AV_SYNC_TYPE_VIDEO:
-            return get_video_clock();
         case AV_SYNC_TYPE_AUDIO:
             return get_audio_clock();
         case AV_SYNC_TYPE_EXTERNAL:
         default:
-            return av_gettime() / (double)AV_TIME_BASE;
+            return av_gettime() / (double)AV_TIME_BASE - start_time;
     }
 }
 
@@ -313,6 +303,7 @@ static int resample_audio(VideoState *vs, SwrContext *swr, AVFrame *f, AVSampleF
     // Calculate the number of samples for the output buffer
     // relative to the (previous_frame + current frame)
     //  swr_get_delay will get that progressive delay
+    //  a * (b/c)
     int out_nb_samples = av_rescale_rnd(swr_get_delay(swr, f->sample_rate) + f->nb_samples,
                                         av->sample_rate,
                                         f->sample_rate, 
@@ -357,7 +348,6 @@ int VideoState::audio_decode_frame() {
 
     return data_size;
 }
-
 
 /*
  * Responsible for dequeuing frames from the video FrameQueue,
@@ -613,27 +603,18 @@ void VideoState::refresh_video() {
 
     if(diff > AV_SYNC_THRESHOLD) {
         // It's early, reschedule it using the calculated diff
-        schedule_refresh(this, (int)(diff * 1000));
+        schedule_refresh(this, static_cast<int>(diff * 1000));
         return;
-    } else if(diff < -AV_NO_SYNC_THRESHOLD) {
+    } else if(fabs(diff) < -AV_NO_SYNC_THRESHOLD) {
         av_log(NULL, AV_LOG_WARNING, "Late frame, dropping (%.3f)\n", diff);
     } else {
         video_display();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(pictq_mutex);
+    update_pictq_index();
 
-        vp->in_use = false;
-        if(++pictq_rindex >= VIDEO_PICTURE_QUEUE_SIZE) {
-            pictq_rindex = 0;
-        }
-
-        pictq_size--;
-        pictq_cond.notify_all();
-    }
-
-    schedule_refresh(this, 1);
+    double fps_delay = 1 / av_q2d(v_stream->r_frame_rate);
+    schedule_refresh(this, static_cast<int>(fps_delay * 1000));
 }
 
 void VideoState::decode_packets(VideoState *vs) {

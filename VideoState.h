@@ -5,6 +5,7 @@ extern "C" {
 #include <ffmpeg/libswresample/swresample.h>
 #include <ffmpeg/libavformat/avformat.h>
 #include <ffmpeg/libavutil/imgutils.h>
+#include <ffmpeg/libavutil/time.h>
 #include <SDL3/SDL.h>
 }
 #include <thread>
@@ -99,7 +100,6 @@ class VideoState {
         int get_audio_stream_index() { return audio_stream_idx; }
         int get_video_stream_index() { return video_stream_idx; }
 
-        double get_video_clock();
         double get_audio_clock();
         double get_master_clock();
 
@@ -109,23 +109,30 @@ class VideoState {
         void check_sdl(const std::string& action, int line);
         void check_av(const std::string &msg, int rc, int line);
 
+        void schedule_seek(int64_t delay);
         void refresh_video();
 
         bool quit;
     private:
         void setup_video();
         void setup_audio();
-        void audio_callback(SDL_AudioStream *stream, int additional_amount);
-        static void audio_callback_wrapper(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount);
-        static void video_thread(VideoState *vs);
+
         static void decode_packets(VideoState *vs);
 
+        static void video_thread(VideoState *vs);
         int alloc_picture();
         int queue_picture(AVFrame *p_frame, double pts);
+
         int audio_decode_frame();
+        void audio_callback(SDL_AudioStream *stream, int additional_amount);
+        static void audio_callback_wrapper(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount);
+
         void video_display();
+
         double sync_video(AVFrame *src, double pts);
         double sync_audio(short *samples, int samples_size);
+        
+        void update_pictq_index();
 
         FfmpegPtr<AVFormatContext>          file_ctxt;
         const int                           queue_max_size;
@@ -173,19 +180,18 @@ class VideoState {
         av_sync_type                        av_type;
         double                              v_clock;
         double                              a_clock;
-        double                              last_frame_pts;
-        double                              last_frame_delay;
+
+        bool                                seek_pending = false;
+        int                                 seek_flags;
+        int64_t                             seek_delay;
 
         // audio syncing
         double                              audio_diff_cum; /* used for AV difference average computation */
         double                              audio_diff_avg_coef;
         double                              audio_diff_threshold;
         int                                 audio_diff_avg_count;
-        
-        // video syncing
-        double                              frame_timer;
-        double                              current_video_pts;
-        double                              current_video_pts_time;
+
+        int64_t                             start_time = 0;
 
         // Threads
         std::thread                        *video_t;
