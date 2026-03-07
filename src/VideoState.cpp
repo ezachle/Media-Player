@@ -1,7 +1,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
-#include "VideoState.h"
+#include "VideoState.hpp"
 
 typedef std::chrono::milliseconds ms;
 

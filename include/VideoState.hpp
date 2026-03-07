@@ -11,7 +11,7 @@ extern "C" {
 #include <thread>
 #include <memory>
 #include <string>
-#include "FrameQueue.h"
+#include "FrameQueue.hpp"
 
 // With the usage of the Functors below, allows us to cleanly
 // free pointers to Ffmpeg and SDL, no need to manually free

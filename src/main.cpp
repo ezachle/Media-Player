@@ -1,5 +1,5 @@
 #include <iostream>
-#include "VideoState.h"
+#include "VideoState.hpp"
 
 int main(int argc, char **argv) {
     try {
