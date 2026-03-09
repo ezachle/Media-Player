@@ -1,11 +1,10 @@
 #pragma once
-extern "C" {
-#include <ffmpeg/libavutil/frame.h>
-}
 #include <memory>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
+#include "Destructors.hpp"
+#include "VideoState.hpp"
 
 /*
  * Uses the C++ STL Queue to handle how frames are
@@ -18,7 +17,7 @@ extern "C" {
  *
  */
 
-using Frame = std::unique_ptr<AVFrame>;
+using Frame = FfmpegPtr<AVFrame>;
 class FrameQueue {
     public:
         FrameQueue(size_t size) : max_size(size){}
