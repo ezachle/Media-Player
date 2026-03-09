@@ -525,6 +525,7 @@ void VideoState::video_display() {
         SDL_RenderTexture(renderer.get(), texture.get(), NULL, NULL);
         check_sdl("Rendering the texture", __LINE__);
 
+        SDL_ResumeAudioStreamDevice(a_sdl_stream.get());
         SDL_RenderPresent(renderer.get());
         check_sdl("Presenting", __LINE__);
         
@@ -671,6 +672,7 @@ void VideoState::decode_packets(VideoState *vs) {
         av_frame_unref(queue_f.get());
 
         if(vs->seek_pending) {
+            SDL_PauseAudioStreamDevice(vs->a_sdl_stream.get());
             // seek_delay must be in AV_TIME_BASE
             // av_rescale_q here converts the source PTS time base to the destination
             vs->seek_delay = av_rescale_q(vs->seek_delay, AV_TIME_BASE_Q, vs->a_stream->time_base);
@@ -684,11 +686,24 @@ void VideoState::decode_packets(VideoState *vs) {
             vs->check_av("avcodec_flush_buffers()", rc, __LINE__);
 
             vs->audio_diff_cum = vs->audio_diff_avg_count = 0;
-            vs->seek_pending = false;
             vs->v_clock = vs->a_clock = vs->seek_delay;
+            {
+                std::lock_guard<std::mutex> lock(vs->pictq_mutex);
+
+                auto s = vs->get_master_clock();
+                for(int i = 0; i < VIDEO_PICTURE_QUEUE_SIZE; i++) {
+                    VideoPicture *vp = &vs->pictq[i];
+                    vp->pts = s;
+                    vp->in_use = false;
+                    av_frame_unref(vp->frame.get());
+                }
+                vs->pictq_size = vs->pictq_windex = vs->pictq_rindex = 0;
+            }
 
             SDL_FlushEvent(FF_REFRESH_EVENT);
             SDL_FlushAudioStream(vs->a_sdl_stream.get());
+
+            vs->seek_pending = false;
         }
 
         // Returns a reference counted packet for an AV stream
