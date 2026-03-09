@@ -75,7 +75,7 @@ using FfmpegPtr = std::unique_ptr<T, FfmpegDestructors>;
 #define MAX_VIDEOQ_SIZE (15 * 256 * 1024)
 
 typedef struct VideoPicture {
-    AVFrame *frame;
+    FfmpegPtr<AVFrame> frame;
     double pts;
     int width, height;
     bool in_use;
@@ -104,7 +104,7 @@ class VideoState {
         double get_master_clock();
 
         void queue_frame(int stream_idx, AVFrame *f);
-        AVFrame* dequeue_frame(int stream_idx);
+        Frame dequeue_frame(int stream_idx);
 
         void check_sdl(const std::string& action, int line);
         void check_av(const std::string &msg, int rc, int line);
@@ -196,8 +196,8 @@ class VideoState {
         int64_t                             start_time = 0;
 
         // Threads
-        std::thread                        *video_t;
-        std::thread                        *decode_t;
+        std::jthread                       *video_t;
+        std::jthread                       *decode_t;
 };
 
 void schedule_refresh(VideoState *vs, int delay);

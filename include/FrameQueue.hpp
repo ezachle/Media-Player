@@ -3,7 +3,6 @@ extern "C" {
 #include <ffmpeg/libavutil/frame.h>
 }
 #include <memory>
-#include <string>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -35,7 +34,7 @@ class FrameQueue {
             not_empty.notify_one();
         }
 
-        AVFrame* pop() {
+        Frame pop() {
             std::unique_lock<std::mutex> lock(mtx);
             // Wait to receive something
             not_empty.wait(lock, [this](){ return quit_flag || flush_flag || queue.size() > 0; });
@@ -45,7 +44,7 @@ class FrameQueue {
             queue.pop();
 
             not_full.notify_one();
-            return f.release();
+            return f;
         }
 
         void flush() {

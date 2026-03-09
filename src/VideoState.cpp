@@ -55,7 +55,7 @@ VideoState::VideoState(const char* file_path): queue_max_size(32), v_queue(Frame
     std::this_thread::sleep_for(ms(10));
 
     start_time = av_gettime() / 1000000.0;
-    decode_t = new std::thread(decode_packets, this);
+    decode_t = new std::jthread(decode_packets, this);
 }
 
 VideoState::~VideoState() {
@@ -63,12 +63,7 @@ VideoState::~VideoState() {
     pictq_cond.notify_all();
     a_queue.quit();
     v_queue.quit();
-    if(video_t) video_t->join();
-    if(decode_t) decode_t->join();
 
-    for(int i = 0; i <VIDEO_PICTURE_QUEUE_SIZE; i++) {
-        av_frame_free(&pictq[i].frame);
-    }
     delete[] a_buffer;
 }
 
@@ -113,13 +108,13 @@ void VideoState::setup_video() {
                                nullptr, nullptr, nullptr ));
 
     for(int i = 0; i <VIDEO_PICTURE_QUEUE_SIZE; i++) {
-        pictq[i].frame = av_frame_alloc();
+        pictq[i].frame.reset(av_frame_alloc());
         pictq[i].in_use = false;
     }
 
     v_clock = 0;
 
-    video_t = new std::thread(video_thread, this);
+    video_t = new std::jthread(video_thread, this);
 }
 
 /**
@@ -324,7 +319,7 @@ static int resample_audio(VideoState *vs, SwrContext *swr, AVFrame *f, AVSampleF
 int VideoState::audio_decode_frame() {
     int data_size;
 
-    FfmpegPtr<AVFrame> f(dequeue_frame(audio_stream_idx));
+    Frame f(dequeue_frame(audio_stream_idx));
     auto frame = f.get();
     if( frame == nullptr ) return 0;
     if(f->opaque != nullptr) {
@@ -366,20 +361,12 @@ void VideoState::video_thread(VideoState *vs) {
     double pts = 0;
     int idx = vs->video_stream_idx;
     while(!vs->quit) {
-        AVFrame *f = vs->dequeue_frame(idx);
+        Frame dequeued_frame = vs->dequeue_frame(idx);
+        auto f = dequeued_frame.get();
         if(f ==  nullptr || f == NULL) continue;
         if(f->opaque != nullptr) {
             av_frame_unref(f);
             av_free(f->opaque);
-            std::lock_guard<std::mutex> lock(vs->pictq_mutex);
-
-            auto s = vs->get_master_clock();
-            for(int i = 0; i < VIDEO_PICTURE_QUEUE_SIZE; i++) {
-                VideoPicture *vp = &vs->pictq[i];
-                vp->pts = s;
-                vp->in_use = false;
-                av_frame_unref(vp->frame);
-            }
             continue;
         }
 
@@ -411,8 +398,10 @@ int VideoState::queue_picture(AVFrame *p_frame, double pts) {
     lock.unlock();
     if(quit) return -1;
                         
+    lock.lock();
     VideoPicture *vp = &pictq[pictq_windex];
-    if(!vp->in_use || vp->frame == nullptr) {
+    auto f = vp->frame.get();
+    if(!vp->in_use || f == nullptr) {
         vp->pts = pts;
         if(alloc_picture() == -1) return -1;
     }
@@ -422,12 +411,10 @@ int VideoState::queue_picture(AVFrame *p_frame, double pts) {
                         p_frame->linesize,
                         0,
                         p_frame->height,
-                        vp->frame->data,
-                        vp->frame->linesize);
+                        f->data,
+                        f->linesize);
     
     check_av("sws_scale", rc, __LINE__);
-
-    lock.lock();
 
     // We reached the end of our circ buffer, wrap around
     if(++pictq_windex >= VIDEO_PICTURE_QUEUE_SIZE) {
@@ -455,7 +442,7 @@ int VideoState::alloc_picture() {
 
     std::lock_guard<std::mutex> lock(screen_mutex);
 
-    AVFrame *f = vp->frame;
+    AVFrame *f = vp->frame.get();
     rc = av_image_alloc(f->data, f->linesize, w, h, AV_PIX_FMT_YUV420P, 32);
     check_av("av_image_fill_arrays()", rc, __LINE__);
 
@@ -500,7 +487,8 @@ void VideoState::video_display() {
     if(quit) return;
 
     VideoPicture *vp = &pictq[pictq_rindex];
-    if(!quit && vp->in_use && vp->frame != nullptr) {
+    AVFrame *f = vp->frame.get();
+    if(!quit && vp->in_use && f != nullptr) {
         std::lock_guard<std::mutex> lock(screen_mutex);
         // Calculates the delay using the base frame rate, and
         // schedules a refresh according to the in milliseconds
@@ -509,7 +497,6 @@ void VideoState::video_display() {
         double delay = 1.0 / fps;
         schedule_refresh(this, static_cast<int>((delay * 1000) - 10));
 
-        auto f = vp->frame;
         SDL_UpdateYUVTexture(texture.get(), nullptr,
                              f->data[0], f->linesize[0],
                              f->data[1], f->linesize[1],
@@ -776,7 +763,7 @@ void VideoState::queue_frame(int stream_idx, AVFrame *f) {
     }
 }
 
-AVFrame* VideoState::dequeue_frame(int stream_idx) {
+Frame VideoState::dequeue_frame(int stream_idx) {
     if(stream_idx == audio_stream_idx) {
         return a_queue.pop();
     } else if(stream_idx == video_stream_idx) {
